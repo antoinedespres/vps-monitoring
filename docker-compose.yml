@@ -1,0 +1,18 @@
+services:
+  vps-monitoring:
+    # Replace "antoinedespres" with your own GitHub username/org if you fork
+    # this repo - the CI workflow pushes to ghcr.io/<owner>/<repo>.
+    image: ghcr.io/antoinedespres/vps-monitoring:latest
+    container_name: vps-monitoring
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /var/log/fail2ban.log:/var/log/fail2ban.log:ro
+      - /var/log/auth.log:/var/log/auth.log:ro
+      - /var/log/caddy/access.log:/var/log/caddy/access.log:ro
+    # GIDs of the host's `adm` (reads auth.log/fail2ban.log) and `caddy`
+    # (reads its access log) groups - run `getent group adm caddy` on the
+    # VPS to confirm/update these if they ever differ.
+    group_add:
+      - "4"    # adm
+      - "982"  # caddy
