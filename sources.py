@@ -1,4 +1,5 @@
 """Tail log files on the VPS and yield structured events for the alerting engine."""
+import ipaddress
 import json
 import os
 import re
@@ -42,6 +43,26 @@ def _inode(path):
         return os.stat(path).st_ino
     except FileNotFoundError:
         return None
+
+
+def is_private_ip(ip):
+    """True for RFC1918/loopback/link-local addresses - traffic that hasn't
+    actually come in from the internet (e.g. requests hairpinned back through
+    the host from another local Docker container) and shouldn't be treated
+    as a potential brute-force source."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
+def extract_user_agent(request):
+    headers = request.get("headers", {})
+    for key in ("User-Agent", "user-agent"):
+        values = headers.get(key)
+        if values:
+            return values[0]
+    return "unknown"
 
 
 class SlidingWindowCounter:
@@ -139,7 +160,7 @@ class CaddyRequestRate:
             if request.get("host") != self.host:
                 continue
             ip = request.get("client_ip") or request.get("remote_ip")
-            if not ip:
+            if not ip or is_private_ip(ip):
                 continue
             now = time.time()
             hits = self._hits[ip]
@@ -181,7 +202,7 @@ class CaddyLoginOutcomes:
             if request.get("host") != self.host:
                 continue
             ip = request.get("client_ip") or request.get("remote_ip")
-            if not ip:
+            if not ip or is_private_ip(ip):
                 continue
             uri = request.get("uri", "")
             method = request.get("method")
@@ -195,4 +216,5 @@ class CaddyLoginOutcomes:
                     "type": "login_success",
                     "ip": ip,
                     "recent_attempts": self.attempts.count(ip),
+                    "user_agent": extract_user_agent(request),
                 }

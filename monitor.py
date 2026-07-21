@@ -114,19 +114,25 @@ def watch_http_login(notifier):
 
     for event in CaddyLoginOutcomes(log_path, host, window_seconds=window).events():
         is_trusted = event["ip"] in trusted
+        fields = {
+            "IP": event["ip"],
+            "Host": host,
+            "Recent attempts": event["recent_attempts"],
+            "Device": event["user_agent"],
+        }
         if event["recent_attempts"] >= threshold and not is_trusted:
             notifier.send_embed(
                 "HTTP brute-force SUCCEEDED",
                 f"A Home Assistant login succeeded from an IP that made {event['recent_attempts']} login attempts in the last {window}s.",
-                {"IP": event["ip"], "Host": host, "Recent attempts": event["recent_attempts"]},
+                fields,
                 CRITICAL,
             )
         else:
             note = " (trusted IP)" if is_trusted else ""
             notifier.send_embed(
                 f"New Home Assistant login{note}",
-                "A login succeeded (audit trail, not necessarily suspicious).",
-                {"IP": event["ip"], "Host": host, "Recent attempts": event["recent_attempts"]},
+                "A login succeeded (audit trail, not necessarily suspicious). Check \"Device\" below - background app refresh from your own phone often looks like a fresh login from the same carrier IP.",
+                fields,
                 INFO,
             )
 
