@@ -1,6 +1,9 @@
 # VPS Monitoring
 
-Discord bot that watches a VPS for brute-force activity — SSH login attempts (via `fail2ban`) and HTTP request rate on a public subdomain (via Caddy's access log) — and posts color-coded alert embeds (🟢 recovered / 🟠 warning / 🔴 critical) to a Discord channel.
+Discord bot for a VPS, doing two jobs:
+
+- **Alerting** — watches for brute-force activity, SSH login attempts (via `fail2ban`) and HTTP request rate on a public subdomain (via Caddy's access log), and posts color-coded alert embeds (🟢 recovered / 🟠 warning / 🔴 critical) to a Discord channel.
+- **Slash commands** — answers `/status`, `/cpu`, `/mem`, `/disk`, `/docker`, `/updates` and `/uptime` on demand with the host's current health. Same command set, and the same embed shape, as the sibling `pi-monitoring` bot, so both hosts answer the same questions the same way.
 
 ## How it works
 
@@ -11,9 +14,41 @@ Discord bot that watches a VPS for brute-force activity — SSH login attempts (
   - **HTTP (Home Assistant)**: tails Caddy's log for the login flow. `POST /auth/login_flow/...` requests are counted per IP; a subsequent successful `POST /auth/token` from that IP is reported — 🔴 "brute-force SUCCEEDED" if it followed `HTTP_BRUTEFORCE_SUCCESS_THRESHOLD`+ attempts, otherwise a low-key 🔵 informational "new login" note (useful as a general audit trail even when nothing's wrong).
 - Alerts only fire on **state transitions** for the ban/rate monitors — no spam. The success-detection alerts are one-off audit events by nature (each login is a discrete occurrence), so they fire every time, but only for genuinely new events (never repeated for the same login).
 
+### Slash commands
+
+| Command | Shows |
+|---------|-------|
+| `/status` | One-screen overview: CPU, RAM, disk `/`, containers, pending updates, uptime |
+| `/cpu` | Utilisation across all cores, load averages, top 6 processes by CPU |
+| `/mem` | RAM + swap usage, top 6 processes by resident memory |
+| `/disk` | Usage bar per mounted host filesystem |
+| `/docker` | Every container with state/health |
+| `/updates` | Pending apt packages, which are security, and reboot-required status |
+| `/uptime` | Uptime, boot time, load averages |
+
+Commands are registered **guild-scoped** to `DISCORD_GUILD_ID`, so they appear instantly rather than after Discord's up-to-an-hour global propagation. Leave `DISCORD_GUILD_ID` empty to run the bot alerts-only with no commands.
+
+Note that `pi-monitoring` registers the *same* command names. Discord scopes commands per application, so both work — the picker labels each with its bot — but expect two `/status` entries if both bots are in the same server.
+
+### Seeing the host from inside the container
+
+The bot reports on the host, but runs in a container, so it has to be shown the host explicitly. `docker-compose.yml` does this with two mounts and no extra capabilities:
+
+| Source | Needs | Without it |
+|--------|-------|------------|
+| CPU, RAM, load, uptime | nothing — `/proc`'s aggregate files are host-wide already | — |
+| Top processes, disk, apt/dpkg state, `/run/reboot-required` | `/:/host:ro` (read-only) | `/cpu`, `/mem`, `/disk` and `/updates` say so instead of reporting container figures |
+| Container list (`/docker`) | `/var/run/docker.sock` | `/docker` reports the socket is unmounted |
+
+The host bind is recursive, so it carries the host's procfs at `/host/proc` — that is where the process lists come from. The obvious alternative, `pid: host`, is deliberately **not** used: it works for processes but makes apt skip Ubuntu's phased updates (it compares PID 1's root with its own, decides it is in a chroot, and stops deferring), so `/updates` would report upgrades the host is actually holding back — on this VPS, 32 instead of the true 25. Reading `/host/proc` gets both right and grants less.
+
+The Docker socket is the one mount worth knowing about: `:ro` makes only the socket *file* read-only — the Engine API behind it stays fully writable, so anything that compromises this container compromises the host. That is the price of `/docker`; drop the line from `docker-compose.yml` and the other six commands carry on unaffected. Each source degrades to a clear message when its mount is missing, rather than silently reporting the container's own numbers.
+
+`/updates` reads the host's real apt state by pointing the container's `apt-get -s dist-upgrade` at the host tree (`-o Dir=/host`), which reports package-for-package identically to running it on the host. If that ever fails it falls back to the counts in Ubuntu's daily `update-notifier` motd summary — no package names, and up to a day stale, flagged as such.
+
 ## Setup
 
-1. Create a Discord Application + Bot at [discord.com/developers/applications](https://discord.com/developers/applications), copy its token, and invite it to your server with the `Send Messages` + `Embed Links` permissions (OAuth2 → URL Generator → scope `bot`).
+1. Create a Discord Application + Bot at [discord.com/developers/applications](https://discord.com/developers/applications), copy its token, and invite it to your server with the `Send Messages` + `Embed Links` permissions and the scopes `bot` **and** `applications.commands` (OAuth2 → URL Generator). The second scope is what allows slash commands; if the bot was invited before they existed, re-invite it with that scope added.
 2. On the VPS: `mkdir -p ~/apps/vps-monitoring`, copy `docker-compose.yml` there, then `cp .env.example .env` (fill in `DISCORD_BOT_TOKEN`) in that same directory.
 3. Log the VPS into ghcr.io once, with a PAT that has `read:packages` (create at [github.com/settings/tokens](https://github.com/settings/tokens)):
    ```
@@ -35,7 +70,7 @@ Workflow: branch → PR → merge to `main` → the above runs automatically. Re
 
 ## Configuration
 
-All thresholds and paths are in `.env` (see `.env.example`): fail2ban log/jail, SSH port (for alert context only), Caddy log path, monitored host, warn/critical request-rate thresholds, and the brute-force-success correlation window/thresholds.
+All thresholds and paths are in `.env` (see `.env.example`, which is a template — the real `.env` is git-ignored and lives on the VPS): fail2ban log/jail, SSH port (for alert context only), Caddy log path, monitored host, warn/critical request-rate thresholds, and the brute-force-success correlation window/thresholds. `DISCORD_GUILD_ID` enables slash commands, `HOST_LABEL` names the VPS in their embeds, and `HOST_ROOT` says where the host root is bind-mounted (set it to `/` if you ever run the bot outside a container).
 
 `TRUSTED_IPS` (comma-separated) downgrades a "brute-force SUCCEEDED" alert to a low-key 🔵 info note for known IPs (e.g. your own), instead of 🔴 critical — useful for typo'd passwords/usernames from your own machine, or repeated testing.
 

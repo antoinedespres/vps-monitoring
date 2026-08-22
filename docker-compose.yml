@@ -6,10 +6,26 @@ services:
     container_name: vps-monitoring
     restart: unless-stopped
     env_file: .env
+    # The slash commands report on the *host*, but the bot runs in a container,
+    # so it has to be shown the host explicitly.
     volumes:
       - /var/log/fail2ban.log:/var/log/fail2ban.log:ro
       - /var/log/auth.log:/var/log/auth.log:ro
       - /var/log/caddy/access.log:/var/log/caddy/access.log:ro
+      # Read-only view of the host root. Being a recursive bind, it carries
+      # the host's procfs at /host/proc too, which is what lets /cpu and /mem
+      # list the host's real processes. Deliberately *not* `pid: host`: that
+      # would also work, but it makes apt skip Ubuntu's phased updates, so
+      # /updates would report upgrades the host is actually deferring.
+      # Drop this mount and /disk, /updates and the process lists say so
+      # rather than quietly reporting this container's own figures.
+      - /:/host:ro
+      # Powers /docker. NOTE: `:ro` only makes the socket *file* read-only -
+      # the Docker API behind it stays fully writable, so a compromise of this
+      # container is a compromise of the host. Everything else mounted here is
+      # genuinely read-only; drop this line and /docker degrades to a message
+      # while the other six commands keep working.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     # GIDs of the host's `adm` (reads auth.log/fail2ban.log) and `caddy`
     # (reads its access log) groups - run `getent group adm caddy` on the
     # VPS to confirm/update these if they ever differ.

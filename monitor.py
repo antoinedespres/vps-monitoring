@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Entry point: watches SSH (via fail2ban + auth log) and Caddy access logs,
-sends color-coded Discord embed alerts on brute-force activity and flags
-whether an attack actually succeeded in logging in."""
+"""Entry point for vps-monitoring. Two jobs:
+
+  1. Watch SSH (via fail2ban + auth log) and Caddy access logs, sending
+     color-coded Discord embed alerts on brute-force activity and flagging
+     whether an attack actually succeeded in logging in.
+  2. Serve read-only slash commands (/status, /cpu, /mem, /disk, /docker,
+     /updates, /uptime) over the Discord Gateway, giving the same view of this
+     VPS that the sibling pi-monitoring bot gives of the Raspberry Pi.
+"""
 import logging
 import os
 import threading
 
 from alerting import CRITICAL, INFO, OK, DiscordNotifier, Monitor
+from commands import InteractionHandler, fetch_application_id, register_guild_commands
 from presence import GatewayPresence
 from sources import CaddyLoginOutcomes, CaddyRequestRate, Fail2banBanEvents, SSHBruteForceSuccess
 
@@ -140,7 +147,9 @@ def watch_http_login(notifier):
 def main():
     token = env("DISCORD_BOT_TOKEN")
     channel_id = env("DISCORD_CHANNEL_ID")
+    guild_id = env("DISCORD_GUILD_ID")
     host = env("MONITORED_HOST")
+    host_label = env("HOST_LABEL", "vps")
     if not token or not channel_id or not host:
         raise SystemExit("DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID and MONITORED_HOST must be set (see .env.example)")
 
@@ -154,7 +163,15 @@ def main():
         INFO,
     )
 
-    GatewayPresence(token).start()
+    on_interaction = None
+    if guild_id:
+        application_id = fetch_application_id(token)
+        register_guild_commands(token, application_id, guild_id)
+        on_interaction = InteractionHandler(application_id, token, host_label).handle
+    else:
+        logger.info("DISCORD_GUILD_ID not set - slash commands disabled")
+
+    GatewayPresence(token, on_interaction=on_interaction).start()
 
     watchers = [watch_ssh_bans, watch_ssh_success, watch_http, watch_http_login]
     threads = [threading.Thread(target=w, args=(notifier,), daemon=True) for w in watchers]
