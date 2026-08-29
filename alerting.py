@@ -27,13 +27,15 @@ class DiscordNotifier:
             "Content-Type": "application/json",
         })
 
-    def send_embed(self, title, description, fields, state):
+    def send_embed(self, title, description, fields, state, inline=True):
+        """`inline=False` lays the fields out full-width, one per row - needed
+        for anything list-shaped (a package list) rather than a short value."""
         payload = {
             "embeds": [{
                 "title": f"{EMOJI[state]} {title}",
                 "description": description,
                 "color": COLOR[state],
-                "fields": [{"name": k, "value": str(v), "inline": True} for k, v in fields.items()],
+                "fields": [{"name": k, "value": str(v), "inline": inline} for k, v in fields.items()],
                 "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "footer": {"text": "vps-monitoring"},
             }]

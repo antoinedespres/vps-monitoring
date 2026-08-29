@@ -1,9 +1,10 @@
 # VPS Monitoring
 
-Discord bot for a VPS, doing two jobs:
+Discord bot for a VPS, doing three jobs:
 
 - **Alerting** — watches for brute-force activity, SSH login attempts (via `fail2ban`) and HTTP request rate on a public subdomain (via Caddy's access log), and posts color-coded alert embeds (🟢 recovered / 🟠 warning / 🔴 critical) to a Discord channel.
 - **Slash commands** — answers `/status`, `/cpu`, `/mem`, `/disk`, `/docker`, `/updates` and `/uptime` on demand with the host's current health. Same command set, and the same embed shape, as the sibling `pi-monitoring` bot, so both hosts answer the same questions the same way.
+- **Installed-update reports** — when `unattended-upgrades` installs something, posts an embed listing what it applied, with `old → new` versions. Read back from the host's apt history, so it reports what actually landed rather than what was merely pending.
 
 ## How it works
 
@@ -12,6 +13,7 @@ Discord bot for a VPS, doing two jobs:
 - **Did the brute-force succeed?** — the piece `fail2ban`/rate-limiting alone can't answer, since a fast or lucky attacker can log in before triggering a ban:
   - **SSH**: tails `/var/log/auth.log` for `Failed password` / `Invalid user` lines, keeping a per-IP failure count in a sliding window. If an `Accepted` login then comes from an IP that had `SSH_BRUTEFORCE_SUCCESS_THRESHOLD`+ recent failures, fires a 🔴 "SSH brute-force SUCCEEDED" alert.
   - **HTTP (Home Assistant)**: tails Caddy's log for the login flow. `POST /auth/login_flow/...` requests are counted per IP; a subsequent successful `POST /auth/token` from that IP is reported — 🔴 "brute-force SUCCEEDED" if it followed `HTTP_BRUTEFORCE_SUCCESS_THRESHOLD`+ attempts, otherwise a low-key 🔵 informational "new login" note (useful as a general audit trail even when nothing's wrong).
+- **Installed updates**: polls the host's `/var/log/apt/history.log` (every `INSTALLED_UPDATES_POLL_SECONDS`, default 300 — it is appended to about once a day, so there is nothing to gain from tailing it). Each `unattended-upgrade` run is reported once, as a 🔵 embed listing the packages upgraded, installed and removed. See below.
 - Alerts only fire on **state transitions** for the ban/rate monitors — no spam. The success-detection alerts are one-off audit events by nature (each login is a discrete occurrence), so they fire every time, but only for genuinely new events (never repeated for the same login).
 
 ### Slash commands
@@ -30,6 +32,33 @@ Commands are registered **guild-scoped** to `DISCORD_GUILD_ID`, so they appear i
 
 Note that `pi-monitoring` registers the *same* command names. Discord scopes commands per application, so both work — the picker labels each with its bot — but expect two `/status` entries if both bots are in the same server.
 
+### Installed-update reports
+
+`unattended-upgrades` installs in several small dpkg steps, each its own entry
+in `/var/log/apt/history.log` — a kernel upgrade on this VPS produced six.
+Entries close together are grouped and reported as **one** embed, and only once
+the log has been idle for `INSTALLED_UPDATES_SETTLE_SECONDS` (default 180), so
+a run is announced whole rather than batch by batch. `unattended-upgrade`'s own
+`--dry-run` simulations are written to the same log and are deliberately
+ignored — they would otherwise announce upgrades that were never installed.
+
+Version strings are shortened by dropping vendor packaging suffixes that repeat
+on both sides and say nothing (`~ubuntu.26.04~resolute` on Docker's packages,
+`+deb13u1`, `+rpt1`), which keeps a long run inside Discord's 1024-character
+field limit. A suffix is kept whenever it is the *only* difference between the
+two versions — `1.25.0-2ubuntu4.3 → 4.4` is left alone, since dropping it would
+render the line as an upgrade from a version to itself.
+
+How far the bot has reported is a timestamp kept in `STATE_PATH`, backed by a
+Docker volume, so a redeploy neither replays the last upgrade nor loses one that
+landed while the container was down. On a first ever start it adopts the newest
+entry already in the log rather than replaying it. Manual `apt` runs you make
+yourself are not reported. Set `REPORT_INSTALLED_UPDATES=0` to turn it off.
+
+Entry timestamps are the host's local time and are only ever compared with each
+other; the idle window comes from the log's mtime, an epoch comparison, so the
+container's timezone never has to match the host's.
+
 ### Seeing the host from inside the container
 
 The bot reports on the host, but runs in a container, so it has to be shown the host explicitly. `docker-compose.yml` does this with two mounts and no extra capabilities:
@@ -37,7 +66,7 @@ The bot reports on the host, but runs in a container, so it has to be shown the 
 | Source | Needs | Without it |
 |--------|-------|------------|
 | CPU, RAM, load, uptime | nothing — `/proc`'s aggregate files are host-wide already | — |
-| Top processes, disk, apt/dpkg state, `/run/reboot-required` | `/:/host:ro` (read-only) | `/cpu`, `/mem`, `/disk` and `/updates` say so instead of reporting container figures |
+| Top processes, disk, apt/dpkg state, `/run/reboot-required`, apt history | `/:/host:ro` (read-only) | `/cpu`, `/mem`, `/disk` and `/updates` say so instead of reporting container figures; installed-update reports go quiet |
 | Container list (`/docker`) | `/var/run/docker.sock` | `/docker` reports the socket is unmounted |
 
 The host bind is recursive, so it carries the host's procfs at `/host/proc` — that is where the process lists come from. The obvious alternative, `pid: host`, is deliberately **not** used: it works for processes but makes apt skip Ubuntu's phased updates (it compares PID 1's root with its own, decides it is in a chroot, and stops deferring), so `/updates` would report upgrades the host is actually holding back — on this VPS, 32 instead of the true 25. Reading `/host/proc` gets both right and grants less.

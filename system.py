@@ -308,15 +308,22 @@ def _motd_counts():
     return int(total.group(1)), int(security.group(1)) if security else 0
 
 
-def apt_status():
-    reboot = os.path.exists(hostclient.host_path("/run/reboot-required")) or \
+def reboot_state():
+    """(required, packages) - the flag file a package update drops when its
+    change only takes effect after a reboot. Cheap: two stat calls, so the
+    upgrade reporter can ask without paying for a full apt simulation."""
+    required = os.path.exists(hostclient.host_path("/run/reboot-required")) or \
         os.path.exists(hostclient.host_path("/var/run/reboot-required"))
-    reboot_pkgs = []
-    if reboot:
+    packages = []
+    if required:
         raw = hostclient.read_host_text("/run/reboot-required.pkgs") or \
             hostclient.read_host_text("/var/run/reboot-required.pkgs")
-        reboot_pkgs = sorted({p.strip() for p in raw.splitlines() if p.strip()})
+        packages = sorted({p.strip() for p in raw.splitlines() if p.strip()})
+    return required, packages
 
+
+def apt_status():
+    reboot, reboot_pkgs = reboot_state()
     base = {"reboot_required": reboot, "reboot_pkgs": reboot_pkgs}
 
     if not hostclient.host_mounted():
@@ -357,6 +364,88 @@ def _apt_lists_mtime():
         return os.stat(hostclient.host_path("/var/lib/apt/lists")).st_mtime
     except OSError:
         return None
+
+
+# --------------------------------------------------------------------------- #
+# APT history (what was actually installed, not just what is pending)
+# --------------------------------------------------------------------------- #
+HISTORY_LOG = "/var/log/apt/history.log"
+
+# "wget:amd64 (1.25.0-2ubuntu4.3, 1.25.0-2ubuntu4.4)" -> name, versions.
+# Matched per package rather than split on commas, because the version pairs
+# contain commas themselves.
+_HISTORY_PKG_RE = re.compile(r"([^\s,()]+?)(?::[a-z0-9]+)?\s+\(([^)]*)\)")
+
+
+def _norm_ts(value):
+    """history.log separates date and time with two spaces; collapse it so the
+    fixed-width timestamps compare correctly as plain strings."""
+    return " ".join(value.split()) if value else ""
+
+
+def _parse_history_packages(value):
+    packages = []
+    for name, versions in _HISTORY_PKG_RE.findall(value or ""):
+        parts = [v.strip() for v in versions.split(",")]
+        # Upgrades read "(old, new)"; installs read "(version)" or
+        # "(version, automatic)" when the package came in as a dependency.
+        if len(parts) == 2 and parts[1] != "automatic":
+            packages.append({"name": name, "old": parts[0], "new": parts[1]})
+        else:
+            packages.append({"name": name, "old": None, "new": parts[0]})
+    return packages
+
+
+def apt_history():
+    """Recent apt transactions, parsed from the host's /var/log/apt/history.log.
+
+    Returns {"runs": [...], "quiet_seconds": ...}, or an {"error": ...} marker.
+
+    `quiet_seconds` is how long the log has been idle, taken from its mtime.
+    That is an epoch comparison, so it holds whatever timezones the host and
+    this container are in - they need not agree, and this one is UTC while the
+    host's is whatever it is. Entry timestamps stay as the log's own strings
+    and are only ever compared with each other, never with a clock.
+
+    `unattended` marks a run started by unattended-upgrades. Its --dry-run
+    simulations land in this log too, and are deliberately excluded - reporting
+    them would announce upgrades that were never installed.
+    """
+    if not hostclient.host_mounted():
+        return {"error": f"host root not mounted at {hostclient.HOST_ROOT}"}
+    path = hostclient.host_path(HISTORY_LOG)
+    try:
+        quiet_seconds = time.time() - os.stat(path).st_mtime
+    except OSError as exc:
+        return {"error": f"cannot read {HISTORY_LOG}: {exc}"}
+
+    runs = []
+    for block in re.split(r"\n\s*\n", hostclient.read_text(path)):
+        entry = {}
+        for line in block.splitlines():
+            key, sep, value = line.partition(":")
+            if sep and key and not key[0].isspace():
+                entry[key.strip()] = value.strip()
+        start = _norm_ts(entry.get("Start-Date", ""))
+        if not start:
+            continue
+        commandline = entry.get("Commandline", "")
+        runs.append({
+            "start": start,
+            "end": _norm_ts(entry.get("End-Date", "")) or start,
+            "commandline": commandline,
+            "requested_by": entry.get("Requested-By"),
+            "unattended": (commandline.startswith("/usr/bin/unattended-upgrade")
+                           and "--dry-run" not in commandline),
+            "upgrade": _parse_history_packages(entry.get("Upgrade")),
+            "install": _parse_history_packages(entry.get("Install")),
+            "remove": _parse_history_packages(
+                " ".join(v for v in (entry.get("Remove"), entry.get("Purge")) if v)
+            ),
+            "error": entry.get("Error"),
+        })
+    runs.sort(key=lambda r: r["start"])
+    return {"runs": runs, "quiet_seconds": quiet_seconds}
 
 
 # --------------------------------------------------------------------------- #

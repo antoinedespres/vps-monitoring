@@ -26,9 +26,16 @@ services:
       # genuinely read-only; drop this line and /docker degrades to a message
       # while the other six commands keep working.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Small JSON state file (how far through the host's apt history the bot
+      # has already reported), so a redeploy neither replays the last upgrade
+      # nor loses one that landed while the container was down.
+      - vps-monitoring-state:/var/lib/vps-monitoring
     # GIDs of the host's `adm` (reads auth.log/fail2ban.log) and `caddy`
     # (reads its access log) groups - run `getent group adm caddy` on the
     # VPS to confirm/update these if they ever differ.
     group_add:
       - "4"    # adm
       - "982"  # caddy
+
+volumes:
+  vps-monitoring-state:
